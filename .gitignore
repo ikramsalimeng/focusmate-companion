@@ -1,0 +1,17 @@
+# Mac
+.DS_Store
+**/.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Zip artifacts
+*.zip
+
+# Audio files (not bundled — user supplies their own)
+audio/effects/*.mp3
+audio/effects/*.m4a
+audio/effects/*.wav
+audio/minutes/*.mp3
+audio/seconds/*.mp3

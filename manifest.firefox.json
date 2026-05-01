@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "Focusmate Companion",
+  "description": "Audio companion for Focusmate sessions: tick sounds, voice time announcements, and session cues to keep you locked in.",
+  "version": "1.0.0",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://app.focusmate.com/*"
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Focusmate Companion"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://app.focusmate.com/*"],
+      "js": ["browser-api.js", "focusmate.content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "audio/effects/*",
+        "audio/minutes/*",
+        "audio/seconds/*"
+      ],
+      "matches": ["https://app.focusmate.com/*"]
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "focusmate-companion@ikramdev",
+      "strict_min_version": "109.0"
+    }
+  }
+}
