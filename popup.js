@@ -1,4 +1,4 @@
-// popup.js — Focusmate Companion
+// popup.js — Focusmate Companion v1.2
 
 const api = window.browserAPI || (typeof browser !== 'undefined' ? browser : chrome);
 const $ = id => document.getElementById(id);
@@ -23,7 +23,6 @@ function render() {
   const empty = $('taskEmpty');
   if (!container || !empty) return;
 
-  // Show/hide empty state
   if (tasks.length === 0) {
     empty.classList.add('show');
     container.innerHTML = '';
@@ -31,7 +30,6 @@ function render() {
   }
   empty.classList.remove('show');
 
-  // Build HTML string — fast and simple
   container.innerHTML = tasks.map(t => `
     <div class="task-item${t.id === pickedId ? ' picked' : ''}" data-id="${t.id}">
       <input type="checkbox" class="task-cb" ${t.done ? 'checked' : ''} data-action="toggle" data-id="${t.id}">
@@ -45,11 +43,9 @@ function escHtml(str) {
   return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// One event listener on the container handles ALL task actions
 function initTaskEvents() {
   const container = $('taskItems');
 
-  // Clicks (delete button + checkbox label area)
   container.addEventListener('click', e => {
     const action = e.target.dataset.action;
     const id     = e.target.dataset.id;
@@ -69,7 +65,6 @@ function initTaskEvents() {
     }
   });
 
-  // Checkbox changes
   container.addEventListener('change', e => {
     if (e.target.dataset.action !== 'toggle') return;
     const id = e.target.dataset.id;
@@ -77,7 +72,6 @@ function initTaskEvents() {
     if (!t) return;
     t.done = e.target.checked;
     if (pickedId === id) pickedId = null;
-    // Done tasks sink to bottom
     const todo = tasks.filter(t => !t.done);
     const done = tasks.filter(t =>  t.done);
     tasks = [...todo, ...done];
@@ -132,21 +126,30 @@ const DEFAULTS = {
   audioOn: true, tickEnabled: true, voiceEnabled: true,
   secondsCountdownEnabled: false, tickVolume: 0.5, voiceVolume: 0.8,
   announcementInterval: 5, tickSound: 'tick-tock',
-  transitionEnabled: false, transitionPreReminder: false, transitionSound: 'chime'
+  transitionEnabled: false, transitionPreReminder: false, transitionSound: 'chime',
+  ambientEnabled: false, ambientSound: 'brown', ambientVolume: 0.15,
+  ambientBetweenSessions: true,
+  preSessionWarningEnabled: true,
+  preSessionWarningSound: 'ding',
+  advancedOpen: false
 };
 
 let testAudio = null;
 
 function applyUI(data) {
-  $('audioOn').checked                 = data.audioOn                 ?? DEFAULTS.audioOn;
-  $('tickEnabled').checked             = data.tickEnabled             ?? DEFAULTS.tickEnabled;
-  $('voiceEnabled').checked            = data.voiceEnabled            ?? DEFAULTS.voiceEnabled;
-  $('secondsCountdownEnabled').checked = data.secondsCountdownEnabled ?? DEFAULTS.secondsCountdownEnabled;
-  $('transitionEnabled').checked       = data.transitionEnabled       ?? DEFAULTS.transitionEnabled;
-  $('transitionPreReminder').checked   = data.transitionPreReminder   ?? DEFAULTS.transitionPreReminder;
-  $('announcementInterval').value      = data.announcementInterval    ?? DEFAULTS.announcementInterval;
-  $('tickSound').value                 = data.tickSound               ?? DEFAULTS.tickSound;
-  $('transitionSound').value           = data.transitionSound         ?? DEFAULTS.transitionSound;
+  // Mute button reflects audioOn
+  updateMuteButton(data.audioOn ?? DEFAULTS.audioOn);
+
+  $('tickEnabled').checked              = data.tickEnabled              ?? DEFAULTS.tickEnabled;
+  $('voiceEnabled').checked             = data.voiceEnabled             ?? DEFAULTS.voiceEnabled;
+  $('secondsCountdownEnabled').checked  = data.secondsCountdownEnabled  ?? DEFAULTS.secondsCountdownEnabled;
+  $('transitionEnabled').checked        = data.transitionEnabled        ?? DEFAULTS.transitionEnabled;
+  $('transitionPreReminder').checked    = data.transitionPreReminder    ?? DEFAULTS.transitionPreReminder;
+  $('preSessionWarningEnabled').checked = data.preSessionWarningEnabled ?? DEFAULTS.preSessionWarningEnabled;
+  $('announcementInterval').value       = data.announcementInterval     ?? DEFAULTS.announcementInterval;
+  $('tickSound').value                  = data.tickSound                ?? DEFAULTS.tickSound;
+  $('transitionSound').value            = data.transitionSound          ?? DEFAULTS.transitionSound;
+  $('preSessionWarningSound').value     = data.preSessionWarningSound   ?? DEFAULTS.preSessionWarningSound;
 
   const tv = data.tickVolume  ?? DEFAULTS.tickVolume;
   $('tickVolume').value = Math.round(tv * 100);
@@ -155,6 +158,20 @@ function applyUI(data) {
   const vv = data.voiceVolume ?? DEFAULTS.voiceVolume;
   $('voiceVolume').value = Math.round(vv * 100);
   $('vvVal').textContent = Math.round(vv * 100) + '%';
+
+  $('ambientEnabled').checked         = data.ambientEnabled          ?? DEFAULTS.ambientEnabled;
+  $('ambientBetweenSessions').checked = data.ambientBetweenSessions  ?? DEFAULTS.ambientBetweenSessions;
+  $('ambientSound').value             = data.ambientSound            ?? DEFAULTS.ambientSound;
+  const av = data.ambientVolume ?? DEFAULTS.ambientVolume;
+  $('ambientVolume').value = Math.round(av * 100);
+  $('avVal').textContent = Math.round(av * 100) + '%';
+
+  // Advanced collapse — restore last state
+  const advOpen = data.advancedOpen ?? DEFAULTS.advancedOpen;
+  if (advOpen) {
+    $('advancedToggle').classList.add('open');
+    $('advancedContent').classList.add('open');
+  }
 }
 
 function saveSetting(k, v) { api.storage.local.set({ [k]: v }); }
@@ -165,6 +182,130 @@ function showFb(msg) {
   el.textContent = msg;
   clearTimeout(el._t);
   el._t = setTimeout(() => { el.textContent = ''; }, 2500);
+}
+
+// ─────────────────────────────────────────────
+// MUTE BUTTON
+// ─────────────────────────────────────────────
+
+function updateMuteButton(audioOn) {
+  const btn = $('muteBtn');
+  const icon = $('muteIcon');
+  const label = $('muteLabel');
+  if (audioOn) {
+    btn.classList.remove('muted');
+    icon.textContent = '🔊';
+    label.textContent = 'All Audio On — Tap to Mute';
+  } else {
+    btn.classList.add('muted');
+    icon.textContent = '🔇';
+    label.textContent = 'MUTED — Tap to Unmute';
+  }
+}
+
+// ─────────────────────────────────────────────
+// LIVE COUNTDOWN
+// ─────────────────────────────────────────────
+
+function fmtTime(seconds) {
+  if (seconds == null || seconds < 0) return '—';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  return `${m}:${String(s).padStart(2,'0')}`;
+}
+
+let countdownInterval = null;
+let lastState = null;
+
+function applyState(state) {
+  const cd      = $('countdown');
+  const label   = $('cdLabel');
+  const time    = $('cdTime');
+  const sub     = $('cdSub');
+  const barFill = $('cdBarFill');
+
+  // Clear classes
+  cd.classList.remove('active', 'upcoming', 'imminent');
+
+  // If state is stale (>15s old), Focusmate tab is not active. Show idle.
+  // Threshold accounts for: 5s broadcast interval + buffer for tab inactivity.
+  const age = state ? (Date.now() - (state.ts || 0)) / 1000 : Infinity;
+  const stale = age > 15;
+
+  if (!state || state.kind === 'idle' || !state.kind || stale) {
+    label.textContent = 'Status';
+    time.textContent = '—';
+    sub.textContent = stale && state ? 'Open Focusmate tab to resume' : 'Open Focusmate to begin';
+    barFill.style.width = '0%';
+    return;
+  }
+
+  if (state.kind === 'active') {
+    cd.classList.add('active');
+    label.textContent = '🟢 In Session';
+    time.textContent = fmtTime(state.remaining);
+    sub.textContent = state.total ? `${Math.round(state.total / 60)}-min session` : '';
+    const pct = state.total ? Math.max(0, Math.min(100, (1 - state.remaining / state.total) * 100)) : 0;
+    barFill.style.width = pct + '%';
+    return;
+  }
+
+  if (state.kind === 'upcoming') {
+    if (state.remaining <= 60) {
+      cd.classList.add('imminent');
+      label.textContent = '🔴 Starting Soon';
+      sub.textContent = 'Get to your chair';
+    } else {
+      cd.classList.add('upcoming');
+      label.textContent = '🟡 Next Session';
+      sub.textContent = 'Get ready';
+    }
+    time.textContent = fmtTime(state.remaining);
+    barFill.style.width = '0%';
+    return;
+  }
+}
+
+// Decrement the displayed counter locally between storage updates so the UI
+// looks live. The content script broadcasts every 5 seconds (throttled for
+// performance), so this local ticker fills the 1-second visual gap.
+function tickCountdown() {
+  if (!lastState || !lastState.remaining) return;
+  // Only auto-decrement if the storage timestamp is recent (within 7s — gives
+  // a 2s grace period beyond the 5s broadcast interval).
+  const age = (Date.now() - (lastState.ts || 0)) / 1000;
+  if (age > 7) return;
+  // Re-render with elapsed seconds subtracted from the cached remaining
+  const fakeState = { ...lastState, remaining: Math.max(0, lastState.remaining - Math.floor(age)) };
+  applyState(fakeState);
+}
+
+function startLiveUpdates() {
+  // Initial pull
+  api.storage.local.get('fmcLiveState', d => {
+    if (d.fmcLiveState) {
+      lastState = d.fmcLiveState;
+      applyState(lastState);
+    }
+  });
+
+  // Listen for storage changes (1Hz from content script)
+  api.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+    if (changes.fmcLiveState) {
+      lastState = changes.fmcLiveState.newValue;
+      applyState(lastState);
+    }
+    if (changes.audioOn) {
+      updateMuteButton(changes.audioOn.newValue);
+    }
+  });
+
+  // Local tick for smoothness
+  if (countdownInterval) clearInterval(countdownInterval);
+  countdownInterval = setInterval(tickCountdown, 1000);
 }
 
 // ─────────────────────────────────────────────
@@ -179,27 +320,11 @@ document.addEventListener('DOMContentLoaded', () => {
   $('popoutBtn').addEventListener('click', () => {
     const url = api.runtime.getURL('popup.html') + '?popout=1';
     if (api.windows) {
-      api.windows.create({ url, type: 'popup', width: 340, height: 580 });
+      api.windows.create({ url, type: 'popup', width: 360, height: 700 });
     } else {
-      window.open(url, '_blank', 'width=340,height=580');
+      window.open(url, '_blank', 'width=360,height=700');
     }
   });
-
-  // ── Status ──
-  try {
-    api.tabs.query({ active: true, currentWindow: true }, tabs => {
-      const title = tabs?.[0]?.title || '';
-      const url   = tabs?.[0]?.url   || '';
-      if (/until end/i.test(title)) {
-        $('dot').classList.add('active');
-        $('statusText').textContent = 'Active in Focusmate session';
-      } else if (url.includes('app.focusmate.com')) {
-        $('statusText').textContent = 'On Focusmate — join a session';
-      } else {
-        $('statusText').textContent = 'Open app.focusmate.com to use';
-      }
-    });
-  } catch { $('statusText').textContent = 'Ready'; }
 
   // ── Tabs ──
   document.querySelectorAll('.tab').forEach(tab => {
@@ -211,21 +336,52 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
+  // ── Advanced collapse ──
+  $('advancedToggle').addEventListener('click', () => {
+    const isOpen = $('advancedToggle').classList.toggle('open');
+    $('advancedContent').classList.toggle('open');
+    saveSetting('advancedOpen', isOpen);
+  });
+
+  // ── Mute button ──
+  $('muteBtn').addEventListener('click', () => {
+    api.storage.local.get('audioOn', d => {
+      const next = !(d.audioOn ?? true);
+      saveSetting('audioOn', next);
+      updateMuteButton(next);
+    });
+  });
+
   // ── Load settings ──
   api.storage.local.get(null, data => {
     applyUI(data);
     tasks = Array.isArray(data.fmTasks) ? data.fmTasks : [];
     render();
+    if (data.fmcLiveState) {
+      lastState = data.fmcLiveState;
+      applyState(lastState);
+    }
   });
 
-  // ── Audio toggles ──
-  ['audioOn','tickEnabled','voiceEnabled','secondsCountdownEnabled',
-   'transitionEnabled','transitionPreReminder'].forEach(id => {
+  // ── Live countdown subscription ──
+  startLiveUpdates();
+
+  // ── Audio toggles (everything except audioOn — that's the mute button) ──
+  ['tickEnabled','voiceEnabled','secondsCountdownEnabled',
+   'transitionEnabled','transitionPreReminder','ambientEnabled',
+   'ambientBetweenSessions','preSessionWarningEnabled'].forEach(id => {
     $(id).addEventListener('change', e => saveSetting(id, e.target.checked));
   });
   $('announcementInterval').addEventListener('change', e => saveSetting('announcementInterval', parseInt(e.target.value)));
   $('tickSound').addEventListener('change', e => saveSetting('tickSound', e.target.value));
   $('transitionSound').addEventListener('change', e => saveSetting('transitionSound', e.target.value));
+  $('preSessionWarningSound').addEventListener('change', e => saveSetting('preSessionWarningSound', e.target.value));
+  $('ambientSound').addEventListener('change', e => saveSetting('ambientSound', e.target.value));
+
+  $('ambientVolume').addEventListener('input', e => {
+    $('avVal').textContent = e.target.value + '%';
+    saveSetting('ambientVolume', parseInt(e.target.value) / 100);
+  });
 
   $('tickVolume').addEventListener('input', e => {
     $('tvVal').textContent = e.target.value + '%';
@@ -238,7 +394,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (testAudio) testAudio.volume = parseInt(e.target.value) / 100;
   });
 
-  // ── Test buttons ──
+  // ── Test buttons (in Advanced) ──
   $('testTickBtn').addEventListener('click', () => {
     if (testAudio) { testAudio.pause(); testAudio = null; }
     const vol = parseInt($('tickVolume').value) / 100;
@@ -261,14 +417,12 @@ document.addEventListener('DOMContentLoaded', () => {
   // ── Task events ──
   initTaskEvents();
 
-  // Task input — auto-grow
   const taskInput = $('taskInput');
   taskInput.addEventListener('input', () => {
     taskInput.style.height = 'auto';
     taskInput.style.height = Math.min(taskInput.scrollHeight, 90) + 'px';
   });
 
-  // Enter = add, Shift+Enter = newline
   taskInput.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -289,7 +443,6 @@ document.addEventListener('DOMContentLoaded', () => {
     taskInput.focus();
   });
 
-  // Pick for me
   $('pickBtn').addEventListener('click', () => {
     const pending = tasks.filter(t => !t.done);
     if (!pending.length) return;
@@ -301,7 +454,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }, 60);
   });
 
-  // Copy all
   $('copyBtn').addEventListener('click', () => {
     if (!tasks.length) return;
     const text = tasks.map(t => `- [${t.done ? 'x' : ' '}] ${t.text}`).join('\n');
@@ -320,7 +472,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Clear done
   $('clearBtn').addEventListener('click', () => {
     tasks = tasks.filter(t => !t.done);
     saveTasks();

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Focusmate Companion",
   "description": "Audio companion for Focusmate sessions: tick sounds, voice time announcements, and session cues to keep you locked in.",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "permissions": ["storage"],
   "host_permissions": [
     "https://app.focusmate.com/*"
@@ -28,7 +28,8 @@
       "resources": [
         "audio/effects/*",
         "audio/minutes/*",
-        "audio/seconds/*"
+        "audio/seconds/*",
+        "audio/ambient/*"
       ],
       "matches": ["https://app.focusmate.com/*"]
     }

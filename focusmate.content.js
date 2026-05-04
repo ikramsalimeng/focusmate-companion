@@ -43,7 +43,7 @@ function isInActiveSession() {
 // ============================================================================
 // Audio System — mirrors Flow Club Companion exactly
 // audio/effects/tick1.mp3, tok1.mp3, tick.m4a, beep1.mp3, beep2.mp3, ding.mp3, chime.mp3
-// audio/minutes/m01.mp3 … m25.mp3
+// audio/minutes/m01.mp3 … m75.mp3 (covers all Focusmate session lengths: 25, 50, 75 min)
 // audio/seconds/s01.mp3 … s09.mp3, s10.mp3, s20.mp3, s30.mp3, s40.mp3, s50.mp3
 // ============================================================================
 
@@ -61,13 +61,29 @@ class AudioPlayer {
       tickSound: 'tick-tock',
       transitionEnabled: false,
       transitionPreReminder: false,
-      transitionSound: 'chime'
+      transitionSound: 'chime',
+      // Ambient background sound (loops during session)
+      ambientEnabled: false,
+      ambientSound: 'brown',  // 'brown' | 'dark' | 'rain' | 'none'
+      ambientVolume: 0.15,
+      // Keep ambient playing between sessions (on dashboard / waiting screens)
+      ambientBetweenSessions: true,
+      // 1-minute warning before next session starts
+      preSessionWarningEnabled: true,
+      preSessionWarningSound: 'ding'
     };
     this.currentTick = 0;
     this.lastPlayedCues = new Set();
     this.loadSettings();
-    api.storage.onChanged.addListener((_changes, area) => {
-      if (area === 'local') this.loadSettings();
+    api.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local') return;
+      // PERFORMANCE: skip reload when only fmcLiveState changed — that key is
+      // written BY the content script itself for popup sync, not a real setting
+      // change. Reloading settings on every broadcast would do a full storage
+      // read every 5 seconds for nothing.
+      const keys = Object.keys(changes);
+      if (keys.length === 1 && keys[0] === 'fmcLiveState') return;
+      this.loadSettings();
     });
   }
 
@@ -88,6 +104,14 @@ class AudioPlayer {
       if (data.transitionEnabled !== undefined) this.settings.transitionEnabled = data.transitionEnabled;
       if (data.transitionPreReminder !== undefined) this.settings.transitionPreReminder = data.transitionPreReminder;
       if (data.transitionSound !== undefined) this.settings.transitionSound = data.transitionSound;
+      if (data.ambientEnabled !== undefined) this.settings.ambientEnabled = data.ambientEnabled;
+      if (data.ambientSound !== undefined) this.settings.ambientSound = data.ambientSound;
+      if (data.ambientVolume !== undefined) this.settings.ambientVolume = data.ambientVolume;
+      if (data.ambientBetweenSessions !== undefined) this.settings.ambientBetweenSessions = data.ambientBetweenSessions;
+      if (data.preSessionWarningEnabled !== undefined) this.settings.preSessionWarningEnabled = data.preSessionWarningEnabled;
+      if (data.preSessionWarningSound !== undefined) this.settings.preSessionWarningSound = data.preSessionWarningSound;
+      // React to ambient changes immediately
+      this._refreshAmbient();
     });
   }
 
@@ -207,7 +231,183 @@ class AudioPlayer {
     }
   }
 
+  // 1-minute warning ding before the next session starts.
+  // Plays a single distinctive sound. Default = 'ding' so it's audibly different
+  // from in-session 'chime' transitions.
+  async playPreSessionWarning() {
+    if (!this.settings.audioOn || !this.settings.preSessionWarningEnabled) return;
+    try {
+      if (!this.isExtensionContextValid()) return;
+      const soundMap = {
+        ding:  'audio/effects/ding.mp3',
+        chime: 'audio/effects/chime.mp3',
+        beep1: 'audio/effects/beep1.mp3',
+        beep2: 'audio/effects/beep2.mp3'
+      };
+      const file = soundMap[this.settings.preSessionWarningSound] || 'audio/effects/ding.mp3';
+      // Use a slightly higher volume than tick — it needs to cut through ambient.
+      const vol = Math.min(1.0, Math.max(this.settings.voiceVolume, 0.4));
+      const audio = this.getAudio(file, vol, true);
+      audio.load(); audio.currentTime = 0;
+      try { await audio.play(); } catch {
+        await new Promise(r => setTimeout(r, 100));
+        audio.load(); await audio.play();
+      }
+      console.log('[Focusmate Companion] 1-minute warning fired.');
+    } catch (err) {
+      if (err.message && err.message.includes('Extension context')) return;
+      console.error('[Focusmate Companion] Pre-session warning failed:', err);
+    }
+  }
+
   resetCues() { this.lastPlayedCues.clear(); }
+
+  // ── Ambient background sound (looping) ──
+  // Uses Web Audio API with TWO scheduled buffer sources that overlap by 1 second.
+  // This eliminates ANY perceptible seam, even if the source MP3 isn't perfectly seamless.
+  //
+  // BEHAVIOR:
+  // - During session: plays at ambientVolume.
+  // - Between sessions (on dashboard, waiting screens): plays IF ambientBetweenSessions=true.
+  //   This is the rumination-killer mode — silence is when the spirals start.
+  _refreshAmbient() {
+    // Called whenever settings change OR session phase changes
+    const masterOff = !this.settings.audioOn || !this.settings.ambientEnabled
+        || this.settings.ambientSound === 'none';
+    if (masterOff) {
+      this._stopAmbient();
+      return;
+    }
+    const shouldPlay = this._sessionActive || this.settings.ambientBetweenSessions;
+    if (!shouldPlay) {
+      this._stopAmbient();
+      return;
+    }
+    this._startAmbient();
+  }
+
+  setSessionActive(active) {
+    this._sessionActive = active;
+    this._refreshAmbient();
+  }
+
+  _getAmbientCtx() {
+    if (!this._ambientCtx || this._ambientCtx.state === 'closed') {
+      this._ambientCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (this._ambientCtx.state === 'suspended') this._ambientCtx.resume();
+    return this._ambientCtx;
+  }
+
+  async _startAmbient() {
+    const file = `audio/ambient/${this.settings.ambientSound}.mp3`;
+    const url = api.runtime.getURL(file);
+
+    // Already playing this file? Just update volume.
+    if (this._ambientCurrent === url && this._ambientGain) {
+      this._ambientGain.gain.setValueAtTime(this.settings.ambientVolume, this._getAmbientCtx().currentTime);
+      return;
+    }
+
+    this._stopAmbient();
+    this._ambientCurrent = url;
+
+    try {
+      const ctx = this._getAmbientCtx();
+
+      // Fetch and decode the audio file ONCE
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const arrayBuffer = await response.arrayBuffer();
+      const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+
+      // Master gain node for volume control
+      const masterGain = ctx.createGain();
+      masterGain.gain.value = this.settings.ambientVolume;
+      masterGain.connect(ctx.destination);
+      this._ambientGain = masterGain;
+      this._ambientBuffer = audioBuffer;
+
+      // Crossfade duration in seconds — overlaps the END of one playback with the START of the next
+      const CROSSFADE = 1.0;
+      this._ambientCrossfade = CROSSFADE;
+      this._ambientStopped = false;
+
+      // Schedule the FIRST playback immediately
+      this._scheduleAmbientPlayback(ctx.currentTime, true);
+    } catch (err) {
+      console.warn('[Focusmate Companion] Ambient setup failed (is the file in audio/ambient/?):', err.message);
+      this._ambientCurrent = null;
+    }
+  }
+
+  _scheduleAmbientPlayback(startTime, isFirst) {
+    if (this._ambientStopped || !this._ambientBuffer) return;
+
+    const ctx = this._getAmbientCtx();
+    const buffer = this._ambientBuffer;
+    const xf = this._ambientCrossfade;
+    const dur = buffer.duration;
+
+    // Create a buffer source for this playback
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+
+    // Per-source gain for the fade in/out at the seams
+    const fadeGain = ctx.createGain();
+    source.connect(fadeGain);
+    fadeGain.connect(this._ambientGain);
+
+    // Fade in (skip on the very first one — start at full)
+    if (isFirst) {
+      fadeGain.gain.setValueAtTime(1.0, startTime);
+    } else {
+      fadeGain.gain.setValueAtTime(0.0, startTime);
+      fadeGain.gain.linearRampToValueAtTime(1.0, startTime + xf);
+    }
+
+    // Fade out at the end
+    const endTime = startTime + dur;
+    fadeGain.gain.setValueAtTime(1.0, endTime - xf);
+    fadeGain.gain.linearRampToValueAtTime(0.0, endTime);
+
+    source.start(startTime);
+    source.stop(endTime + 0.05);
+
+    // Schedule the NEXT playback to start xf seconds before this one ends
+    // (so they overlap and crossfade)
+    const nextStart = endTime - xf;
+    source.onended = () => {
+      try { source.disconnect(); fadeGain.disconnect(); } catch {}
+    };
+
+    // Use setTimeout to schedule the next chunk well in advance
+    const msUntilNextSchedule = Math.max(0, (nextStart - ctx.currentTime - 2) * 1000);
+    this._ambientNextTimer = setTimeout(() => {
+      this._scheduleAmbientPlayback(nextStart, false);
+    }, msUntilNextSchedule);
+  }
+
+  _stopAmbient() {
+    this._ambientStopped = true;
+    this._ambientCurrent = null;
+    this._ambientBuffer = null;
+    if (this._ambientNextTimer) {
+      clearTimeout(this._ambientNextTimer);
+      this._ambientNextTimer = null;
+    }
+    if (this._ambientGain) {
+      try {
+        // Quick fade to silence then disconnect
+        const ctx = this._getAmbientCtx();
+        this._ambientGain.gain.setValueAtTime(this._ambientGain.gain.value, ctx.currentTime);
+        this._ambientGain.gain.linearRampToValueAtTime(0.0, ctx.currentTime + 0.2);
+        const oldGain = this._ambientGain;
+        setTimeout(() => { try { oldGain.disconnect(); } catch {} }, 300);
+      } catch {}
+      this._ambientGain = null;
+    }
+  }
 
   async processTimerUpdate(remainingSeconds) {
     if (remainingSeconds === null || remainingSeconds < 0) return;
@@ -220,14 +420,10 @@ class AudioPlayer {
     const seconds = remainingSeconds % 60;
     const interval = this.settings.announcementInterval;
 
-    // Minute announcements
-    if (seconds === 0 && minutes >= 1 && minutes <= 25 && minutes % interval === 0) {
+    // Minute announcements — voice files exist for m01.mp3 through m75.mp3
+    // Covers 25-min, 50-min, and 75-min Focusmate sessions
+    if (seconds === 0 && minutes >= 1 && minutes <= 75 && minutes % interval === 0) {
       await this.playVoice(`audio/minutes/m${String(minutes).padStart(2, '0')}.mp3`);
-      return;
-    }
-    // Ding for long sessions (>25 min)
-    if (seconds === 0 && minutes > 25 && minutes % 5 === 0) {
-      await this.playDing();
       return;
     }
     // Seconds countdown
@@ -252,10 +448,170 @@ class FocusmateAudioCompanion {
   constructor() {
     this.audioPlayer = new AudioPlayer();
     this.intervalId = null;
-    this.tickIntervalId = null;
     this.lastSeenSeconds = null;
     this.sessionPhase = 'unknown';
     this.preReminderFired = false;
+    // 1-min pre-session warning state
+    this._oneMinWarningFired = false;
+    this._lastUpcomingSeconds = null;
+    // Cache for the dashboard's "Starts in M:SS" element (perf)
+    this._upcomingEl = null;
+    this._lastDomScan = 0;
+    // Session length used by the popup progress bar (25/50/75 min)
+    this._sessionLengthSeconds = null;
+    // Popup messaging — broadcast current state for live UI
+    this._lastBroadcastState = null;
+    this._lastBroadcastTs = 0;
+  }
+
+  // Detect Focusmate session length from the timer.
+  // Sessions are 25, 50, or 75 minutes. The first reading after session start
+  // is approximately the full duration; we snap to the nearest standard length.
+  // Used ONLY for the popup progress bar — no midpoint audio.
+  _detectSessionLength(remainingSeconds) {
+    if (this._sessionLengthSeconds !== null) return;
+    if (remainingSeconds > 60 * 60 + 5) {
+      this._sessionLengthSeconds = 75 * 60;
+    } else if (remainingSeconds > 35 * 60) {
+      this._sessionLengthSeconds = 50 * 60;
+    } else {
+      this._sessionLengthSeconds = 25 * 60;
+    }
+  }
+
+  // Broadcast current state to popup via storage (popup listens for changes).
+  // PERFORMANCE: Storage writes have non-zero cost on every browser (especially
+  // Firefox). During an active session, the timer changes every second, so naive
+  // broadcasting would write to storage 60 times per minute. We throttle:
+  //   - Active session: write every 5s (popup ticks locally between)
+  //   - Phase transitions or upcoming session: write immediately (UX critical)
+  //   - Idle: write once when phase first becomes idle, then never
+  _broadcastState() {
+    let state;
+    if (this.sessionPhase === 'active' && this.lastSeenSeconds !== null) {
+      state = {
+        kind: 'active',
+        remaining: this.lastSeenSeconds,
+        total: this._sessionLengthSeconds || (50 * 60),
+        ts: Date.now()
+      };
+    } else if (this._lastUpcomingSeconds !== null) {
+      state = {
+        kind: 'upcoming',
+        remaining: this._lastUpcomingSeconds,
+        ts: Date.now()
+      };
+    } else {
+      state = { kind: 'idle', ts: Date.now() };
+    }
+
+    // Phase signature (without remaining) — changes only on phase transitions
+    const phaseSig = state.kind;
+    const lastPhaseSig = (this._lastBroadcastState || '').split('|')[0];
+    const phaseChanged = phaseSig !== lastPhaseSig;
+
+    // Throttle: only broadcast on phase change OR every 5 seconds
+    const now = Date.now();
+    const elapsed = now - this._lastBroadcastTs;
+    if (!phaseChanged && elapsed < 5000) return;
+    // For upcoming, also broadcast when crossing the 60s threshold (UX matters)
+    // — but the throttle of 5s is fine; the audio warning fires immediately
+    // regardless of broadcast.
+
+    this._lastBroadcastState = `${phaseSig}|${state.remaining ?? ''}`;
+    this._lastBroadcastTs = now;
+    try { api.storage.local.set({ fmcLiveState: state }); } catch {}
+  }
+
+  // Scan the dashboard for "Starts in M:SS" countdown.
+  // PERFORMANCE: Cache the matching element. Only walk the DOM when the cached
+  // element is gone or stale. document.body.textContent on Focusmate's dashboard
+  // serializes 50-200 KB of React-rendered text — running it every second causes
+  // measurable lag on MacBook Air. Caching cuts this to a single read of one
+  // element's textContent (~30 bytes).
+  detectUpcomingSession() {
+    if (this.sessionPhase === 'active') {
+      this._oneMinWarningFired = false;
+      this._lastUpcomingSeconds = null;
+      this._upcomingEl = null;
+      return;
+    }
+
+    // Try cached element first
+    let text = null;
+    if (this._upcomingEl && this._upcomingEl.isConnected) {
+      text = this._upcomingEl.textContent || '';
+      if (!/Starts in \d/.test(text)) {
+        // Cached element no longer shows the countdown; invalidate
+        this._upcomingEl = null;
+        text = null;
+      }
+    }
+
+    // Cache miss — find the element ONCE, then reuse it.
+    // Throttle expensive re-scans to once per 3 seconds when no element is cached.
+    if (text === null) {
+      const now = Date.now();
+      if (this._lastDomScan && (now - this._lastDomScan) < 3000) {
+        // Recently scanned and found nothing — skip this tick
+        if (this._lastUpcomingSeconds !== null) {
+          this._oneMinWarningFired = false;
+          this._lastUpcomingSeconds = null;
+        }
+        return;
+      }
+      this._lastDomScan = now;
+
+      // Targeted scan: walk only short text-bearing elements (not the whole body).
+      // Focusmate renders "Starts in M:SS" inside a small element near
+      // the upcoming-session card.
+      const candidates = document.querySelectorAll(
+        'span, div, p, time, [class*="ountdown"], [class*="tarts"]'
+      );
+      for (let i = 0; i < candidates.length; i++) {
+        const el = candidates[i];
+        // Cheap check: leaf-ish elements only (skip giant containers)
+        if (el.childElementCount > 3) continue;
+        const t = el.textContent;
+        if (t && t.length < 60 && /Starts in \d/.test(t)) {
+          this._upcomingEl = el;
+          text = t;
+          break;
+        }
+      }
+
+      if (text === null) {
+        // No upcoming session visible
+        if (this._lastUpcomingSeconds !== null) {
+          this._oneMinWarningFired = false;
+          this._lastUpcomingSeconds = null;
+        }
+        return;
+      }
+    }
+
+    const match = text.match(/Starts in (\d{1,2}):(\d{2})/i);
+    if (!match) {
+      this._upcomingEl = null;
+      return;
+    }
+
+    const minutes = parseInt(match[1], 10);
+    const seconds = parseInt(match[2], 10);
+    const total = minutes * 60 + seconds;
+
+    // If countdown jumps back up (new session loaded), reset the fired flag
+    if (this._lastUpcomingSeconds !== null && total > this._lastUpcomingSeconds + 5) {
+      this._oneMinWarningFired = false;
+    }
+
+    // Fire warning when crossing into the 60-second window for the first time.
+    if (total <= 60 && total > 50 && !this._oneMinWarningFired) {
+      this._oneMinWarningFired = true;
+      this.audioPlayer.playPreSessionWarning();
+    }
+
+    this._lastUpcomingSeconds = total;
   }
 
   poll() {
@@ -267,15 +623,21 @@ class FocusmateAudioCompanion {
         this.preReminderFired = false;
         this.lastSeenSeconds = null;
         this.audioPlayer.resetCues();
+        this.audioPlayer.setSessionActive(false);
         console.log('[Focusmate Companion] Not in session — waiting.');
       }
+      // Detect upcoming session and fire 1-min warning if applicable
+      this.detectUpcomingSession();
+      this._broadcastState();
       return;
     }
 
     if (this.sessionPhase !== 'active') {
       this.sessionPhase = 'active';
       this.preReminderFired = false;
-      console.log('[Focusmate Companion] Session active! Parsed from title:', document.title);
+      this._sessionLengthSeconds = null;
+      console.log('[Focusmate Companion] Session active.');
+      this.audioPlayer.setSessionActive(true);
       if (this.audioPlayer.settings.transitionEnabled) {
         this.audioPlayer.playTransitionCue();
       }
@@ -283,6 +645,9 @@ class FocusmateAudioCompanion {
 
     const seconds = getTimerFromTitle();
     if (seconds === null) return;
+
+    // Detect session length once per session for the popup progress bar
+    this._detectSessionLength(seconds);
 
     const hasChanged = this.lastSeenSeconds === null || this.lastSeenSeconds !== seconds;
     if (!hasChanged) return;
@@ -296,27 +661,29 @@ class FocusmateAudioCompanion {
 
     this.audioPlayer.processTimerUpdate(seconds);
     this.lastSeenSeconds = seconds;
-  }
-
-  startTickInterval() {
-    if (this.tickIntervalId) return;
-    this.tickIntervalId = setInterval(() => {
-      if (this.lastSeenSeconds !== null && this.lastSeenSeconds > 0 && this.sessionPhase === 'active') {
-        this.audioPlayer.playTick();
-      }
-    }, 1000);
+    this._broadcastState();
   }
 
   start() {
     if (this.intervalId != null) return;
-    this.intervalId = setInterval(() => this.poll(), 1000);
-    this.startTickInterval();
+    // Single 1Hz loop handles both polling AND tick.
+    // Previously had two separate setInterval calls — wasteful.
+    this.intervalId = setInterval(() => {
+      // Pause work entirely when tab is hidden (saves CPU on background tabs).
+      // Audio scheduling for ambient is unaffected (Web Audio runs independently).
+      if (document.hidden) return;
+      this.poll();
+      // Tick is part of the same loop now
+      if (this.lastSeenSeconds !== null && this.lastSeenSeconds > 0
+          && this.sessionPhase === 'active') {
+        this.audioPlayer.playTick();
+      }
+    }, 1000);
     this.poll();
   }
 
   stop() {
     if (this.intervalId != null) { clearInterval(this.intervalId); this.intervalId = null; }
-    if (this.tickIntervalId != null) { clearInterval(this.tickIntervalId); this.tickIntervalId = null; }
   }
 }
 

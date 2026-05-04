@@ -1,17 +1,16 @@
-# Mac
+# macOS
 .DS_Store
 **/.DS_Store
+__MACOSX/
 
 # Editor
 .vscode/
 .idea/
 
-# Zip artifacts
+# Zip/build artifacts
 *.zip
+*.crx
+*.xpi
 
-# Audio files (not bundled — user supplies their own)
-audio/effects/*.mp3
-audio/effects/*.m4a
-audio/effects/*.wav
-audio/minutes/*.mp3
-audio/seconds/*.mp3
+# Audio binaries are not committed by default.
+# Keep folders with .gitkeep files instead.
